@@ -14,6 +14,7 @@ interface EvidencePassage {
   text: string;
   section?: string | null;
   page?: number | null;
+  source_scope?: string | null;
 }
 
 interface SupportingPaper {
@@ -26,6 +27,7 @@ interface SupportingPaper {
   url?: string | null;
   pdf_url?: string | null;
   citation_count: number;
+  source_scope?: string | null;
   evidence_passages: EvidencePassage[];
 }
 
@@ -37,6 +39,8 @@ interface ResearchGap {
   category: string;
   origin: "explicit" | "cross_paper_inference";
   evidence_strength: "strong" | "moderate" | "preliminary";
+  source_coverage?: string | null;
+  qualifications?: string | null;
   supporting_paper_count: number;
   supporting_papers: SupportingPaper[];
   counterevidence: string[];
@@ -46,6 +50,10 @@ interface ResearchGap {
 interface CorpusStats {
   papers_retrieved: number;
   papers_analysed: number;
+  raw_provider_results?: number;
+  deduplicated_papers?: number;
+  retained_papers?: number;
+  full_text_analysed?: number;
   publication_year_range: {
     start: number | null;
     end: number | null;
@@ -387,7 +395,19 @@ export default function AnalysisResultsPage({
 
               {/* Scope line (plain typography, no rainbow badges) */}
               <div className="flex items-center gap-3 text-[13px] text-[var(--color-text-muted)] flex-wrap">
-                <span className="tabular-nums">{results.corpus.papers_analysed} papers examined</span>
+                {results.corpus.raw_provider_results ? (
+                  <span className="tabular-nums">{results.corpus.raw_provider_results} papers retrieved</span>
+                ) : (
+                  <span className="tabular-nums">{results.corpus.papers_retrieved} papers retrieved</span>
+                )}
+                <span>·</span>
+                <span className="tabular-nums">{results.corpus.papers_analysed} examined</span>
+                {Boolean(results.corpus.full_text_analysed && results.corpus.full_text_analysed > 0) && (
+                  <>
+                    <span>·</span>
+                    <span className="tabular-nums text-[var(--color-accent)]">{results.corpus.full_text_analysed} full-text inspected</span>
+                  </>
+                )}
                 {results.corpus.publication_year_range.start && results.corpus.publication_year_range.end && (
                   <>
                     <span>·</span>
@@ -395,7 +415,7 @@ export default function AnalysisResultsPage({
                   </>
                 )}
                 <span>·</span>
-                <span className="text-[var(--color-text)]">{results.gaps.length} potential research gaps identified</span>
+                <span className="text-[var(--color-text)] font-medium">{results.gaps.length} research gaps identified</span>
               </div>
             </div>
 
@@ -474,78 +494,117 @@ export default function AnalysisResultsPage({
               Showing {filteredGaps.length} of {results.gaps.length} gaps
             </div>
 
-            {/* THE EDITORIAL SINGLE-COLUMN LIST */}
+            {/* RESPONSIVE GRID OF RESEARCH-GAP CARDS */}
             {filteredGaps.length === 0 ? (
               <div className="py-16 text-center text-[var(--color-text-muted)] border-t border-[var(--color-border-subtle)]">
                 No gaps match your filter criteria.
               </div>
             ) : (
-              <div className="border-t border-[var(--color-border)] divide-y divide-[var(--color-border-subtle)]">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pt-2">
                 {filteredGaps.map((gap, idx) => {
                   const isActive = activeRowIndex === idx;
                   const indexLabel = String(idx + 1).padStart(2, "0");
                   const catLabel = CATEGORY_NAMES[gap.category] || "Open Gap";
-                  const originLabel = gap.origin === "cross_paper_inference" ? "Inferred across papers" : "Author-reported";
+                  const originLabel = gap.origin === "cross_paper_inference" ? "Inferred" : "Author-reported";
 
                   return (
                     <motion.div
                       key={gap.gap_id}
-                      initial={{ opacity: 0, y: 10 }}
+                      initial={{ opacity: 0, y: 12 }}
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ duration: 0.24, delay: Math.min(idx * 0.04, 0.4) }}
                       onClick={() => {
                         setActiveRowIndex(idx);
                         setSelectedGap(gap);
                       }}
-                      className={`group py-5 px-3 -mx-3 rounded-[6px] transition-all cursor-pointer flex flex-col sm:flex-row items-start justify-between gap-4 ${
+                      className={`group p-5 rounded-[8px] border transition-all cursor-pointer flex flex-col justify-between space-y-4 ${
                         isActive
-                          ? "bg-[var(--color-surface)] ring-1 ring-[var(--color-border)]"
-                          : "hover:bg-[var(--color-surface)]"
+                          ? "bg-[var(--color-surface)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]"
+                          : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-[var(--color-accent)]"
                       }`}
                       tabIndex={0}
                       role="button"
                       aria-label={`Gap ${indexLabel}: ${gap.title}`}
                     >
-                      {/* Left: Index + Content */}
-                      <div className="flex items-start gap-4 flex-1">
-                        <span className="text-[13px] font-mono text-[var(--color-text-faint)] pt-0.5 tabular-nums">
-                          {indexLabel}
-                        </span>
-
-                        <div className="space-y-1.5 flex-1 max-w-[800px]">
-                          {/* Plain text metadata line: Category · Origin */}
-                          <div className="text-[12px] text-[var(--color-text-muted)] flex items-center gap-1.5">
-                            <span className="font-medium text-[var(--color-text)]">{catLabel}</span>
-                            <span>·</span>
-                            <span className="text-[var(--color-text-faint)]">{originLabel}</span>
-                          </div>
-
-                          {/* Serif Title with subtle translate on hover */}
-                          <h3 className="text-[17px] sm:text-[18px] font-serif-editorial text-[var(--color-text)] group-hover:translate-x-0.5 transition-transform leading-snug">
-                            {gap.title}
-                          </h3>
-
-                          {/* 2-line clamped statement */}
-                          <p className="text-[14px] text-[var(--color-text-muted)] line-clamp-2 leading-relaxed">
-                            {gap.statement}
-                          </p>
-
-                          {/* Primary supporting cited papers snippet */}
-                          <div className="text-[12px] text-[var(--color-text-faint)] pt-1 flex items-center gap-2 truncate">
-                            <span>Cited:</span>
-                            <span className="truncate text-[var(--color-text-muted)]">
-                              {gap.supporting_papers.map((p) => p.title).join("; ")}
+                      {/* Top Meta Row */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-[12px]">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[var(--color-text-faint)] text-[11px] tabular-nums">
+                              {indexLabel}
+                            </span>
+                            <span className="font-medium text-[var(--color-text)]">
+                              {catLabel}
+                            </span>
+                            <span className="text-[var(--color-text-faint)]">·</span>
+                            <span className="text-[var(--color-text-muted)] text-[11px]">
+                              {originLabel}
                             </span>
                           </div>
+                          <EvidenceMeter strength={gap.evidence_strength} />
                         </div>
+
+                        {/* Gap Title */}
+                        <h3 className="text-[17px] font-serif-editorial text-[var(--color-text)] group-hover:text-[var(--color-accent)] transition-colors leading-snug">
+                          {gap.title}
+                        </h3>
+
+                        {/* Concise Gap Statement (Clamped) */}
+                        <p className="text-[13.5px] text-[var(--color-text-muted)] line-clamp-3 leading-relaxed">
+                          {gap.statement}
+                        </p>
                       </div>
 
-                      {/* Right: Meta Column (Evidence Meter + Count) */}
-                      <div className="sm:text-right shrink-0 flex sm:flex-col items-center sm:items-end justify-between w-full sm:w-auto gap-2 pt-1 pl-8 sm:pl-0">
-                        <EvidenceMeter strength={gap.evidence_strength} />
-                        <span className="text-[12px] font-mono text-[var(--color-text-faint)] tabular-nums">
-                          {gap.supporting_paper_count} {gap.supporting_paper_count === 1 ? "paper" : "papers"}
-                        </span>
+                      {/* Supporting Paper Information & Clickable Paper Titles */}
+                      <div className="pt-2 border-t border-[var(--color-border-subtle)] space-y-2">
+                        <div className="text-[11px] font-mono text-[var(--color-text-faint)] flex items-center justify-between">
+                          <span>
+                            {gap.supporting_paper_count} {gap.supporting_paper_count === 1 ? "paper" : "papers"}
+                          </span>
+                          {gap.source_coverage && (
+                            <span className="truncate max-w-[150px]">{gap.source_coverage}</span>
+                          )}
+                        </div>
+
+                        {/* Clickable paper links */}
+                        <div className="space-y-1">
+                          {gap.supporting_papers.slice(0, 2).map((p) => {
+                            const verifiedLink = p.doi ? `https://doi.org/${p.doi}` : p.url || p.pdf_url;
+                            return (
+                              <div key={p.paper_id} className="text-[12px] truncate">
+                                {verifiedLink ? (
+                                  <a
+                                    href={verifiedLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:underline inline-flex items-center gap-1 truncate max-w-full"
+                                    title={p.title}
+                                  >
+                                    <span className="shrink-0 text-[10px]">↗</span>
+                                    <span className="truncate">{p.title}</span>
+                                    {p.year && <span className="text-[var(--color-text-faint)] shrink-0">({p.year})</span>}
+                                  </a>
+                                ) : (
+                                  <span className="text-[var(--color-text-muted)] truncate block" title={p.title}>
+                                    • {p.title} {p.year && `(${p.year})`}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {gap.supporting_papers.length > 2 && (
+                            <span className="text-[11px] text-[var(--color-text-faint)] block">
+                              +{gap.supporting_papers.length - 2} more supporting {gap.supporting_papers.length - 2 === 1 ? "study" : "studies"}
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Card Action */}
+                        <div className="pt-2 flex items-center justify-between text-[12px] text-[var(--color-text-faint)]">
+                          <span>Inspect evidence</span>
+                          <span className="text-[var(--color-accent)] group-hover:translate-x-1 transition-transform">→</span>
+                        </div>
                       </div>
                     </motion.div>
                   );
@@ -583,7 +642,7 @@ export default function AnalysisResultsPage({
               {/* Drawer Header */}
               <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] pb-5">
                 <div className="space-y-1.5 flex-1">
-                  <div className="text-[12px] text-[var(--color-text-muted)] flex items-center gap-2">
+                  <div className="text-[12px] text-[var(--color-text-muted)] flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-[var(--color-text)]">
                       {CATEGORY_NAMES[selectedGap.category] || "Research Gap"}
                     </span>
@@ -628,6 +687,18 @@ export default function AnalysisResultsPage({
                   {selectedGap.why_it_matters}
                 </p>
               </div>
+
+              {/* Scope Qualifications & Boundaries */}
+              {selectedGap.qualifications && (
+                <div className="space-y-2">
+                  <h4 className="text-[11px] font-mono uppercase tracking-wider text-[var(--color-text-faint)]">
+                    Scope Qualifications & Empirical Boundaries
+                  </h4>
+                  <div className="p-3.5 bg-[var(--color-bg)] border border-[var(--color-border-subtle)] rounded-[6px] text-[13px] text-[var(--color-text-muted)] leading-relaxed">
+                    {selectedGap.qualifications}
+                  </div>
+                </div>
+              )}
 
               {/* Cross-Paper Synthesis Reasoning */}
               {selectedGap.reasoning && (
@@ -674,6 +745,9 @@ export default function AnalysisResultsPage({
                               {paper.year && <span>• {paper.year}</span>}
                               {paper.venue && <span>• {paper.venue}</span>}
                               {paper.citation_count > 0 && <span className="tabular-nums">• {paper.citation_count} citations</span>}
+                              <span className="font-mono text-[11px] px-1.5 py-0.2 rounded border border-[var(--color-border)] text-[var(--color-text-faint)]">
+                                {paper.source_scope === "full_text" ? "Full text" : "Abstract"}
+                              </span>
                             </div>
                           </div>
 

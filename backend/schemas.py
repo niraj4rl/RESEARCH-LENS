@@ -43,6 +43,7 @@ class EvidencePassageSchema(BaseModel):
     text: str
     section: Optional[str] = "Limitations"
     page: Optional[int] = None
+    source_scope: Optional[str] = "abstract_only"  # 'abstract_only' or 'full_text'
 
 class SupportingPaperSchema(BaseModel):
     paper_id: str
@@ -54,6 +55,7 @@ class SupportingPaperSchema(BaseModel):
     url: Optional[str] = None
     pdf_url: Optional[str] = None
     citation_count: int = 0
+    source_scope: Optional[str] = "abstract_only"  # 'abstract_only' or 'full_text'
     evidence_passages: List[EvidencePassageSchema] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
@@ -66,6 +68,8 @@ class ResearchGapSchema(BaseModel):
     category: str  # methodological, evaluation, dataset, theoretical, application_domain, generalization, conflicting_findings, future_direction, other
     origin: str  # explicit | cross_paper_inference
     evidence_strength: str  # strong | moderate | preliminary
+    source_coverage: Optional[str] = None
+    qualifications: Optional[str] = None
     supporting_paper_count: int
     supporting_papers: List[SupportingPaperSchema] = Field(default_factory=list)
     counterevidence: List[str] = Field(default_factory=list)
@@ -80,6 +84,10 @@ class YearRangeSchema(BaseModel):
 class CorpusStatsSchema(BaseModel):
     papers_retrieved: int
     papers_analysed: int
+    raw_provider_results: Optional[int] = None
+    deduplicated_papers: Optional[int] = None
+    retained_papers: Optional[int] = None
+    full_text_analysed: Optional[int] = 0
     publication_year_range: YearRangeSchema
     categories_breakdown: Optional[Dict[str, int]] = None
 

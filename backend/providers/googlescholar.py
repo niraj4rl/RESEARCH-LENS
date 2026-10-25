@@ -23,11 +23,16 @@ class GoogleScholarProvider(ScholarProvider):
             return []
 
         proxy = os.getenv("SCHOLARLY_PROXY")
-        if proxy:
-            try:
-                scholarly.set_proxy(proxy)
-            except Exception:
-                logger.exception("Could not configure SCHOLARLY_PROXY")
+        if not proxy:
+            # Google Scholar blocks direct non-proxied automated scraping with CAPTCHA
+            logger.info("Google Scholar proxy (SCHOLARLY_PROXY) not configured; skipping provider to avoid latency.")
+            return []
+
+        try:
+            scholarly.set_proxy(proxy)
+        except Exception:
+            logger.exception("Could not configure SCHOLARLY_PROXY")
+            return []
 
         papers: List[PaperSchema] = []
         try:

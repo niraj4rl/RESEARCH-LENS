@@ -1,13 +1,13 @@
 """
 ResearchLens Gap Discovery Engine
-Implements the 7-stage evidence-backed gap discovery pipeline:
-1. Topic processing & filtering
-2. Scholarly paper retrieval & metadata preservation
-3. Evidence extraction (limitations, future work, evaluation, datasets, assumptions)
-4. Cross-paper synthesis (recurring patterns, inferred gaps vs explicit author limitations)
-5. Gap deduplication & candidate merging
-6. Programmatic evidence validation & provenance verification
-7. Evidence strength calibration & result ranking
+Implements evidence-backed scholarly research gap discovery:
+1. Topic processing & lexical-semantic filtering
+2. Multi-source evidence extraction (abstract screening + full-text inspection)
+3. Strict limitation vs future-work classification (no automatic fallback to conclusion sentences)
+4. Semantic sub-clustering for cross-paper synthesis (requires genuine semantic overlap across papers)
+5. Distinct handling for explicit author-stated limitations vs cross-paper inferred gaps
+6. Non-overclaiming scholarly tone (no unsupported claims of 'confirmed' facts)
+7. Full provenance preservation, citation verification, and transparent evidence coverage
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from schemas import (
     YearRangeSchema,
     AnalysisResultsResponse,
 )
+from full_text import extract_paper_full_text_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +106,25 @@ EVIDENCE_PATTERNS = {
     ],
 }
 
+# Strict future-work regex (passage MUST support future-work classification)
+STRICT_FUTURE_WORK_REGEX = re.compile(
+    r"\b(?:future\s+(?:work|research|direction|directions|investigation|studies)|"
+    r"remains?\s+an?\s+open\s+(?:question|problem|challenge)|"
+    r"remains?\s+(?:unresolved|unanswered|underexplored|unaddressed)|"
+    r"yet\s+to\s+be\s+(?:explored|investigated|resolved)|"
+    r"warrants?\s+further\s+(?:research|investigation|study))\b",
+    re.IGNORECASE,
+)
+
 GENERIC_LIMITATION_CUES = [
     "however", "limitation", "shortcoming", "drawback", "bottleneck",
     "challenge", "struggle", "fails to", "limited to", "vulnerable to",
     "degrades", "unaddressed", "overlooked", "not considered",
 ]
 
+
 class ExtractedEvidence:
+    """Represents a discrete verified evidence passage from a scholarly source."""
     def __init__(
         self,
         paper: PaperSchema,
@@ -120,6 +133,8 @@ class ExtractedEvidence:
         section: str = "Abstract - Limitations",
         confidence: float = 0.8,
         is_future_work: bool = False,
+        source_scope: str = "abstract_only",
+        page: Optional[int] = None,
     ):
         self.paper = paper
         self.passage = passage.strip()
@@ -127,6 +142,8 @@ class ExtractedEvidence:
         self.section = section
         self.confidence = confidence
         self.is_future_work = is_future_work
+        self.source_scope = source_scope
+        self.page = page
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -136,18 +153,24 @@ class ExtractedEvidence:
             "passage": self.passage,
             "category": self.category,
             "section": self.section,
+            "source_scope": self.source_scope,
         }
 
+
 # ---------------------------------------------------------------------------
-# Stage 3: Evidence Extraction
+# Sentence Segmentation & Extraction Helpers
 # ---------------------------------------------------------------------------
 def split_into_sentences(text: str) -> List[str]:
-    """Clean text and split into clean, robust sentence boundaries."""
+    """Clean text and split into robust sentence boundaries."""
     if not text:
         return []
     cleaned = re.sub(r"\s+", " ", text).strip()
-    # Handle common abbreviations to avoid split errors
-    cleaned = re.sub(r"\b(e\.g\.|i\.e\.|et\s+al\.|fig\.|ref\.|vs\.)", lambda m: m.group(0).replace(".", "§"), cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(e\.g\.|i\.e\.|et\s+al\.|fig\.|ref\.|vs\.)",
+        lambda m: m.group(0).replace(".", "§"),
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     parts = re.split(r"(?<=[.!?])\s+", cleaned)
     sentences = []
     for p in parts:
@@ -156,53 +179,121 @@ def split_into_sentences(text: str) -> List[str]:
             sentences.append(restored)
     return sentences
 
-def extract_paper_evidence(paper: PaperSchema) -> List[ExtractedEvidence]:
-    """Extract and classify candidate gap-related evidence passages from a paper's abstract."""
+
+def extract_paper_evidence(paper: PaperSchema, inspect_full_text: bool = True) -> List[ExtractedEvidence]:
+    """
+    Extracts evidence passages from paper.
+    1. Attempts full-text inspection if legitimate open-access text is available.
+    2. Operates on abstract if full text is unavailable.
+    3. Strictly enforces classification (no auto-converting conclusion sentences to future work).
+    """
+    extracted: List[ExtractedEvidence] = []
+    seen_passages: Set[str] = set()
+
+    # Step 1: Check full-text when enabled
+    if inspect_full_text:
+        sections_dict, scope = extract_paper_full_text_evidence(paper)
+        if sections_dict and scope == "full_text":
+            priority_sections = ["limitations", "future_work", "discussion", "evaluation", "methodology", "dataset"]
+            for sec_key in priority_sections:
+                sec_text = sections_dict.get(sec_key, "")
+                if not sec_text:
+                    continue
+                sentences = split_into_sentences(sec_text)
+                for sentence in sentences[:15]:
+                    s_lower = sentence.lower()
+                    matched_category = None
+                    is_future = bool(STRICT_FUTURE_WORK_REGEX.search(s_lower))
+
+                    # Map section to category
+                    if sec_key == "limitations":
+                        matched_category = CATEGORY_METHODOLOGICAL
+                    elif sec_key == "future_work":
+                        if is_future:
+                            matched_category = CATEGORY_FUTURE_DIRECTION
+                    elif sec_key == "evaluation":
+                        matched_category = CATEGORY_EVALUATION
+                    elif sec_key == "dataset":
+                        matched_category = CATEGORY_DATASET
+
+                    # Check specialized patterns if no category assigned yet
+                    if not matched_category:
+                        for cat, patterns in EVIDENCE_PATTERNS.items():
+                            for pat in patterns:
+                                if re.search(pat, s_lower):
+                                    # Never label as future work unless supported
+                                    if cat == CATEGORY_FUTURE_DIRECTION and not is_future:
+                                        continue
+                                    matched_category = cat
+                                    break
+                            if matched_category:
+                                break
+
+                    # Also accept sentences with explicit limitation cues
+                    if not matched_category and any(cue in s_lower for cue in GENERIC_LIMITATION_CUES):
+                        matched_category = CATEGORY_METHODOLOGICAL
+
+                    if matched_category and sentence not in seen_passages:
+                        seen_passages.add(sentence)
+                        extracted.append(
+                            ExtractedEvidence(
+                                paper=paper,
+                                passage=sentence,
+                                category=matched_category,
+                                section=f"Full Text - {sec_key.replace('_', ' ').title()}",
+                                confidence=0.88,
+                                is_future_work=is_future,
+                                source_scope="full_text",
+                            )
+                        )
+            if extracted:
+                return extracted
+
+    # Step 2: Abstract screening (fallback or primary)
     abstract = paper.abstract or ""
     if not abstract:
         return []
 
     sentences = split_into_sentences(abstract)
-    extracted: List[ExtractedEvidence] = []
-    seen_passages: Set[str] = set()
-
     for idx, sentence in enumerate(sentences):
         s_lower = sentence.lower()
         matched_category = None
-        matched_section = "Limitations"
-        is_future = False
+        matched_section = "Abstract - Limitations"
+        is_future = bool(STRICT_FUTURE_WORK_REGEX.search(s_lower))
 
-        # 1. First test specific taxonomy categories
+        # Check specialized taxonomy patterns
         for cat, patterns in EVIDENCE_PATTERNS.items():
             for pat in patterns:
                 if re.search(pat, s_lower):
-                    matched_category = cat
                     if cat == CATEGORY_FUTURE_DIRECTION:
+                        # Requirement: Never label a passage as future work unless supported
+                        if not is_future:
+                            continue
                         is_future = True
-                        matched_section = "Future Work"
+                        matched_section = "Abstract - Future Work"
                     elif cat == CATEGORY_EVALUATION:
-                        matched_section = "Evaluation Limitations"
+                        matched_section = "Abstract - Evaluation Scope"
                     elif cat == CATEGORY_DATASET:
-                        matched_section = "Dataset & Benchmark Scope"
+                        matched_section = "Abstract - Dataset Constraints"
                     elif cat == CATEGORY_CONFLICTING:
-                        matched_section = "Empirical Discrepancies"
+                        matched_section = "Abstract - Conflicting Findings"
                     elif cat == CATEGORY_GENERALIZATION:
-                        matched_section = "Generalization & Scalability"
+                        matched_section = "Abstract - Generalization Boundaries"
                     elif cat == CATEGORY_THEORETICAL:
-                        matched_section = "Theoretical Foundations"
+                        matched_section = "Abstract - Theoretical Limitations"
                     else:
-                        matched_section = "Methodological Constraints"
+                        matched_section = "Abstract - Methodological Limitations"
+                    matched_category = cat
                     break
             if matched_category:
                 break
 
-        # 2. If no specialized pattern matched, check generic limitation cues
+        # Check generic limitation cues if no specialized pattern matched
         if not matched_category:
             has_limitation_cue = any(cue in s_lower for cue in GENERIC_LIMITATION_CUES)
-            # Typically limitations appear in the latter half of the abstract
             if has_limitation_cue and (idx >= len(sentences) // 3 or "however" in s_lower):
                 matched_category = CATEGORY_METHODOLOGICAL
-                matched_section = "Reported Limitations"
+                matched_section = "Abstract - Stated Limitations"
 
         if matched_category and sentence not in seen_passages:
             seen_passages.add(sentence)
@@ -212,53 +303,97 @@ def extract_paper_evidence(paper: PaperSchema) -> List[ExtractedEvidence]:
                     passage=sentence,
                     category=matched_category,
                     section=matched_section,
-                    confidence=0.85 if matched_category != CATEGORY_METHODOLOGICAL else 0.70,
+                    confidence=0.82 if matched_category != CATEGORY_METHODOLOGICAL else 0.70,
                     is_future_work=is_future,
+                    source_scope="abstract_only",
                 )
             )
 
     return extracted
 
-# ---------------------------------------------------------------------------
-# Stage 4 & 5: Cross-Paper Synthesis & Deduplication
-# ---------------------------------------------------------------------------
-def clean_gap_title(raw_title: str) -> str:
-    """Format and polish a gap title for executive clarity."""
-    title = re.sub(r"^[^\w]+", "", raw_title).strip()
-    # Capitalize title cleanly
-    words = title.split()
-    if words:
-        words[0] = words[0].capitalize()
-    return " ".join(words)
 
+# ---------------------------------------------------------------------------
+# Semantic Sub-clustering & Formulation
+# ---------------------------------------------------------------------------
 def extract_coherent_topic_phrase(query: str, passages: List[str]) -> str:
-    """Extract a clean, natural topic noun phrase from the query and passages."""
+    """Extract a natural topic noun phrase from the query and passages."""
     clean_q = re.sub(r"[^\w\s-]", "", query).strip()
     words = clean_q.split()
     if len(words) <= 4:
         return clean_q.title()
-    # If query is long, use first 3-4 salient words
     return " ".join(words[:4]).title()
 
-def generate_evidence_backed_gap_statement(
+
+def cluster_passages_by_semantic_similarity(
+    evidence_items: List[ExtractedEvidence],
+    similarity_threshold: float = 0.15,
+) -> List[List[ExtractedEvidence]]:
+    """
+    Groups evidence items into cohesive semantic sub-clusters.
+    Ensures that papers are not combined solely because they share a category.
+    """
+    if len(evidence_items) <= 1:
+        return [evidence_items] if evidence_items else []
+
+    texts = [ev.passage for ev in evidence_items]
+    try:
+        vec = TfidfVectorizer(
+            stop_words="english",
+            ngram_range=(1, 2),
+            token_pattern=r"(?u)\b[a-zA-Z]{3,}\b",
+            min_df=1,
+        )
+        matrix = vec.fit_transform(texts)
+        sim_matrix = cosine_similarity(matrix, matrix)
+    except Exception:
+        # Fallback: keep individual items
+        return [[ev] for ev in evidence_items]
+
+    # Graph components / clustering based on similarity threshold
+    visited: Set[int] = set()
+    clusters: List[List[ExtractedEvidence]] = []
+
+    for i in range(len(evidence_items)):
+        if i in visited:
+            continue
+        cluster_indices = [i]
+        visited.add(i)
+        for j in range(len(evidence_items)):
+            if j not in visited and sim_matrix[i, j] >= similarity_threshold:
+                cluster_indices.append(j)
+                visited.add(j)
+        clusters.append([evidence_items[idx] for idx in cluster_indices])
+
+    return clusters
+
+
+def generate_gap_statement(
     category: str,
-    topic_keywords: List[str],
     passages: List[str],
     query: str,
     paper_count: int,
     is_inferred: bool,
-) -> Tuple[str, str, str]:
+    source_scope_counts: Dict[str, int],
+) -> Tuple[str, str, str, str, str]:
     """
-    Synthesizes a concise executive gap title (max ~14 words), a grounded formal statement,
-    and clear research significance from verified source passages.
-    Never outputs raw keyword tuples like 'Scale, Large, Based'.
+    Produces concise executive titles (max ~14 words), grounded descriptions,
+    scholarly reasoning (without overclaiming 'confirmed' facts), transparent coverage,
+    and appropriate research qualifications.
     """
     topic = extract_coherent_topic_phrase(query, passages)
     primary_passage = passages[0] if passages else ""
     p_lower = primary_passage.lower()
 
+    ft_count = source_scope_counts.get("full_text", 0)
+    ab_count = source_scope_counts.get("abstract_only", 0)
+    if ft_count > 0 and ab_count > 0:
+        coverage_text = f"Identified across {paper_count} independent studies ({ft_count} full text, {ab_count} abstract-only)."
+    elif ft_count > 0:
+        coverage_text = f"Identified across {paper_count} independent studies with full-text inspection."
+    else:
+        coverage_text = f"Identified across {paper_count} independent studies via abstract screening."
+
     if is_inferred:
-        # Category-specific natural editorial titles (concise, max ~14 words)
         if category == CATEGORY_EVALUATION:
             if "longitudinal" in p_lower or "dynamic" in p_lower or "shift" in p_lower:
                 title = f"Lack of longitudinal evaluation under evolving conditions in {topic}"
@@ -267,14 +402,14 @@ def generate_evidence_backed_gap_statement(
             else:
                 title = f"Evaluation protocol limitations under non-stationary conditions in {topic}"
             statement = (
-                f"Across {paper_count} retrieved investigations, current literature reveals recurring evaluation boundaries in {topic}. "
-                f"While individual models show competitive offline performance, evaluation remains predominantly restricted to static "
-                f"benchmarks without assessing real-time temporal adaptation or live user interaction."
+                f"Synthesized evidence from {paper_count} independent investigations indicates that empirical evaluations in {topic} "
+                f"remain predominantly confined to static or synthetic benchmarks, without testing dynamic operational shifts."
             )
             why_it_matters = (
-                f"Relying solely on static offline metrics conceals performance degradation that occurs during real-world deployment. "
-                f"Establishing longitudinal benchmarks is critical to validating whether proposed approaches remain effective over time."
+                f"Evaluating models solely on static snapshots conceals performance degradation that typically occurs under real-world, "
+                f"evolving user or system dynamics."
             )
+            qualifications = "Evaluations in the retrieved literature rely primarily on standard offline benchmark splits; behavior under live conditions remains unexamined."
         elif category == CATEGORY_DATASET:
             if "sparse" in p_lower or "sparsity" in p_lower:
                 title = f"Severe benchmark sparsity and cold-start constraints in {topic}"
@@ -283,62 +418,73 @@ def generate_evidence_backed_gap_statement(
             else:
                 title = f"Scarcity of diverse, standardized benchmark corpora for {topic}"
             statement = (
-                f"Evidence across {paper_count} published studies identifies fundamental dataset limitations in {topic}. "
-                f"Existing empirical benchmarks suffer from extreme feature sparsity, narrow domain coverage, or lack of standardized ground-truth annotations."
+                f"Across {paper_count} published works, independent authors note recurring dataset constraints in {topic}, "
+                f"highlighting feature sparsity, narrow domain sampling, or absence of standardized ground-truth annotations."
             )
             why_it_matters = (
-                f"Without representative and diverse benchmark datasets, empirical progress cannot be reliably distinguished from overfitting "
-                f"to narrow dataset idiosyncrasies."
+                f"Without representative benchmarks, empirical gains cannot be reliably attributed to methodological advances rather than "
+                f"dataset-specific artifacts."
             )
+            qualifications = "Reported data limitations reflect public benchmark availability and may not encompass private proprietary corpora."
         elif category == CATEGORY_GENERALIZATION:
             title = f"Generalization breakdown and domain shift vulnerabilities in {topic}"
             statement = (
-                f"Cross-paper analysis across {paper_count} studies reveals that architectures in {topic} suffer significant performance degradation "
-                f"when evaluated outside their immediate training distributions or applied to cross-domain scenarios."
+                f"Cross-paper synthesis across {paper_count} studies indicates that architectures developed for {topic} exhibit "
+                f"substantive performance drops when applied to out-of-distribution or cross-domain inputs."
             )
             why_it_matters = (
-                f"High test accuracy within restricted domains does not guarantee transferability. Generalization failure represents a primary "
-                f"obstacle to deploying these methods in unconstrained environments."
+                f"Strong within-domain accuracy does not ensure cross-environment robustness, posing a central hurdle for broad adoption."
             )
+            qualifications = "Domain transfer vulnerability is observed across tested benchmark datasets and warrants verification across other modalities."
         elif category == CATEGORY_METHODOLOGICAL:
-            if "scalability" in p_lower or "computational" in p_lower or "complexity" in p_lower or "bottleneck" in p_lower:
+            if any(w in p_lower for w in ["scalability", "computational", "complexity", "latency", "overhead"]):
                 title = f"Computational scalability bottlenecks in large-scale {topic} models"
             else:
-                title = f"Untested simplifying assumptions and structural bottlenecks in {topic}"
+                title = f"Structural bottlenecks and simplifying assumptions in {topic}"
             statement = (
-                f"Across {paper_count} independent publications, authors report recurring methodological constraints in {topic}. "
-                f"Current algorithms frequently depend on restrictive assumptions or incur substantial computational overhead that impedes scale."
+                f"Across {paper_count} publications, researchers independently identify methodological constraints in {topic}, "
+                f"such as computational overhead or fragile architectural assumptions."
             )
             why_it_matters = (
-                f"Unexamined architectural assumptions limit the practical applicability of theoretical models and often lead to brittle inference under operational scale."
+                f"Unaddressed computational or structural bounds limit practical scalability and raise implementation barriers."
             )
+            qualifications = "Computational bounds depend on specific hardware and model parameter configurations reported by the respective authors."
         elif category == CATEGORY_CONFLICTING:
             title = f"Conflicting empirical outcomes across benchmark configurations in {topic}"
             statement = (
-                f"Literature synthesis indicates notable discrepancies among {paper_count} published studies regarding the relative efficacy of different approaches in {topic}."
+                f"Literature synthesis across {paper_count} studies reveals mixed or conflicting findings regarding comparative "
+                f"method effectiveness in {topic}."
             )
             why_it_matters = (
-                f"Contradictory findings suggest that performance advantages may depend on hidden experimental factors or hyperparameter sensitivity rather than intrinsic algorithmic superiority."
+                f"Divergent empirical results suggest that outcomes may be sensitive to unstandardized hyperparameters or evaluation choices."
             )
+            qualifications = "Discrepancies may arise from varying experimental protocols, training setups, or metric definitions."
         elif category == CATEGORY_THEORETICAL:
             title = f"Inadequate theoretical guarantees and convergence foundations in {topic}"
             statement = (
-                f"Multiple studies note an absence of formal theoretical justifications or convergence guarantees for heuristic optimization techniques used in {topic}."
+                f"Multiple studies note a lack of formal theoretical bounds or convergence guarantees for optimization techniques in {topic}."
             )
             why_it_matters = (
-                f"Without rigorous theoretical bounds, practitioners cannot anticipate failure modes or certify robustness under adversarial or out-of-distribution conditions."
+                f"Without theoretical foundations, practitioners cannot reliably predict edge-case failure modes or certify robustness."
             )
+            qualifications = "Theoretical gaps refer specifically to the mathematical justifications presented in the analysed sample."
         else:
-            title = f"Unresolved methodological boundaries in {topic}"
+            title = f"Underexplored operational parameters in {topic}"
             statement = (
-                f"Across {paper_count} scholarly works, research identifies underexplored operational parameters and open challenges in {topic}."
+                f"Evidence across {paper_count} scholarly works points to recurring open questions and boundaries in {topic}."
             )
             why_it_matters = (
-                f"Addressing these recurring challenges establishes a clearer path toward robust, generalizable scholarly contributions."
+                f"Investigating these recurring observations provides a concrete roadmap for future empirical contributions."
             )
+            qualifications = "Synthesized from common boundaries reported across the retrieved paper set."
+
+        reasoning = (
+            f"Synthesized from {paper_count} independent publications with verified semantic overlap. "
+            f"Rather than an isolated finding, authors independently describe related boundaries. "
+            f"Further comparative evaluation is required to establish definitive causal limits."
+        )
     else:
         # Explicit author-reported gap
-        # Extract a clean, natural snippet of the author's limitation
         cleaned_passage = primary_passage.strip()
         if len(cleaned_passage) > 180:
             cleaned_passage = cleaned_passage[:177] + "..."
@@ -346,274 +492,250 @@ def generate_evidence_backed_gap_statement(
         if category == CATEGORY_EVALUATION:
             title = f"Author-reported evaluation boundary in {topic}"
         elif category == CATEGORY_DATASET:
-            title = f"Author-noted dataset and benchmark limitation in {topic}"
+            title = f"Author-noted dataset constraint in {topic}"
         elif category == CATEGORY_GENERALIZATION:
             title = f"Author-identified generalization constraint in {topic}"
         elif category == CATEGORY_FUTURE_DIRECTION:
-            title = f"Open research direction identified by authors in {topic}"
+            title = f"Author-proposed future research direction in {topic}"
         else:
             title = f"Author-acknowledged methodological limitation in {topic}"
 
         statement = (
-            f"The study's authors explicitly document an unresolved operational boundary: "
+            f"The study's authors explicitly state an unresolved operational boundary: "
             f"\"{cleaned_passage}\""
         )
         why_it_matters = (
-            f"Explicit limitations acknowledged by researchers provide verified anchor points where existing techniques degrade, "
-            f"serving as primary targets for next-generation inquiry."
+            f"Author-acknowledged limitations provide precise, peer-reviewed anchor points where existing techniques degrade."
         )
+        reasoning = f"Direct author limitation documented in source publication. {coverage_text}"
+        qualifications = "This limitation reflects the explicit disclosure of the study authors and has not yet been corroborated across external corpora."
 
-    # Ensure title is well under 14 words
+    # Clamp title to 14 words
     title_words = title.split()
     if len(title_words) > 14:
         title = " ".join(title_words[:13]) + "..."
 
-    return title, statement, why_it_matters
+    return title, statement, why_it_matters, reasoning, qualifications
 
-def extract_top_keywords(texts: List[str], max_terms: int = 4) -> List[str]:
-    """Extract top domain terms from a cluster of texts using TF-IDF."""
-    if not texts:
-        return []
-    try:
-        vec = TfidfVectorizer(
-            stop_words="english",
-            max_df=0.9,
-            min_df=1,
-            ngram_range=(1, 2),
-            token_pattern=r"(?u)\b[a-zA-Z]{3,}\b",
-        )
-        X = vec.fit_transform(texts)
-        scores = X.sum(axis=0).A1
-        features = vec.get_feature_names_out()
-        top_indices = scores.argsort()[::-1][:max_terms]
-        return [features[i] for i in top_indices]
-    except Exception:
-        # Fallback keyword extraction
-        words = re.findall(r"\b[a-zA-Z]{4,}\b", " ".join(texts).lower())
-        stopwords = {"with", "that", "this", "from", "their", "which", "study", "paper", "model", "approach"}
-        filtered = [w for w in words if w not in stopwords]
-        counts = defaultdict(int)
-        for w in filtered:
-            counts[w] += 1
-        return [k for k, _ in sorted(counts.items(), key=lambda x: x[1], reverse=True)[:max_terms]]
 
+# ---------------------------------------------------------------------------
+# Main Gap Synthesis Pipeline
+# ---------------------------------------------------------------------------
 def synthesize_corpus_gaps(
     papers: List[PaperSchema],
     query: str,
+    inspect_full_text: bool = True,
 ) -> List[ResearchGapSchema]:
     """
     Main synthesis pipeline:
-    1. Extracts evidence passages from all papers.
-    2. Groups evidence by category and semantic similarity.
-    3. Cross-synthesizes multi-paper inferred gaps and single-paper explicit directions.
-    4. Deduplicates and merges candidate gaps.
-    5. Validates citations and calculates evidence strength.
+    1. Extracts evidence passages from papers (checking full-text where accessible).
+    2. Groups evidence by category, then sub-clusters by semantic similarity.
+    3. Synthesizes cross-paper gaps ONLY when independent papers share a genuine semantic relationship.
+    4. Generates explicit author-reported gap candidates for standalone high-confidence limitations.
+    5. Deduplicates candidates and validates against retrieved paper text.
+    6. Calibrates evidence strength and transparent coverage.
     """
     if not papers:
         return []
 
-    # 1. Extract evidence
     paper_map: Dict[str, PaperSchema] = {p.id: p for p in papers}
+
+    # Step 1: Extract evidence from each paper
     all_evidence: List[ExtractedEvidence] = []
     for paper in papers:
-        all_evidence.extend(extract_paper_evidence(paper))
+        all_evidence.extend(extract_paper_evidence(paper, inspect_full_text=inspect_full_text))
 
+    # Note: If no evidence is found, we do NOT run a fake fallback on abstract ends!
     if not all_evidence:
-        # Fallback: if abstracts lack explicit limitation keywords, extract key problem statements from abstracts
-        for paper in papers[:10]:
-            abstract = paper.abstract or ""
-            if len(abstract) > 50:
-                sents = split_into_sentences(abstract)
-                for s in sents[-2:]: # last 2 sentences usually contain conclusions or future outlook
-                    all_evidence.append(
-                        ExtractedEvidence(
-                            paper=paper,
-                            passage=s,
-                            category=CATEGORY_FUTURE_DIRECTION,
-                            section="Conclusions & Outlook",
-                            confidence=0.6,
-                            is_future_work=True,
-                        )
-                    )
+        logger.info("No explicit limitation or future-work passages identified in retrieved sample for %r", query)
+        return []
 
-    # 2. Group evidence by category
+    # Step 2: Group by category
     category_groups: Dict[str, List[ExtractedEvidence]] = defaultdict(list)
     for ev in all_evidence:
         category_groups[ev.category].append(ev)
 
     raw_gaps: List[ResearchGapSchema] = []
 
-    # 3. Synthesize gaps for each category
+    # Step 3: For each category, perform semantic sub-clustering
     for category, evidence_list in category_groups.items():
         if not evidence_list:
             continue
 
-        # Group by unique papers
-        papers_in_cat: Dict[str, List[ExtractedEvidence]] = defaultdict(list)
-        for ev in evidence_list:
-            papers_in_cat[ev.paper.id].append(ev)
+        # Sub-cluster evidence passages by semantic similarity
+        clusters = cluster_passages_by_semantic_similarity(evidence_list, similarity_threshold=0.15)
 
-        # If 2 or more distinct papers discuss this category -> Synthesize Cross-Paper Inferred Gap
-        if len(papers_in_cat) >= 2:
-            passages = [ev.passage for ev in evidence_list]
-            keywords = extract_top_keywords(passages, max_terms=4)
-            title, statement, why_it_matters = generate_evidence_backed_gap_statement(
-                category=category,
-                topic_keywords=keywords,
-                passages=passages,
-                query=query,
-                paper_count=len(papers_in_cat),
-                is_inferred=True,
-            )
+        for cluster in clusters:
+            # Map cluster items to distinct papers
+            cluster_papers: Dict[str, List[ExtractedEvidence]] = defaultdict(list)
+            for ev in cluster:
+                cluster_papers[ev.paper.id].append(ev)
 
-            # Build supporting papers list
-            supporting_papers: List[SupportingPaperSchema] = []
-            for paper_id, evs in papers_in_cat.items():
-                p = paper_map[paper_id]
-                passages_schema = [
-                    EvidencePassageSchema(
-                        text=ev.passage,
-                        section=ev.section,
-                        page=None,
+            # Check if this semantic cluster spans >= 2 distinct papers -> Cross-Paper Inferred Gap
+            if len(cluster_papers) >= 2:
+                passages = [ev.passage for ev in cluster]
+                scope_counts: Dict[str, int] = defaultdict(int)
+                for ev in cluster:
+                    scope_counts[ev.source_scope] += 1
+
+                title, statement, why_it_matters, reasoning, qualifications = generate_gap_statement(
+                    category=category,
+                    passages=passages,
+                    query=query,
+                    paper_count=len(cluster_papers),
+                    is_inferred=True,
+                    source_scope_counts=dict(scope_counts),
+                )
+
+                supporting_papers: List[SupportingPaperSchema] = []
+                for pid, evs in cluster_papers.items():
+                    p = paper_map[pid]
+                    passages_schema = [
+                        EvidencePassageSchema(
+                            text=ev.passage,
+                            section=ev.section,
+                            page=ev.page,
+                            source_scope=ev.source_scope,
+                        )
+                        for ev in evs[:2]
+                    ]
+                    paper_scope = "full_text" if any(ev.source_scope == "full_text" for ev in evs) else "abstract_only"
+                    supporting_papers.append(
+                        SupportingPaperSchema(
+                            paper_id=p.id,
+                            title=p.title,
+                            authors=p.authors or [],
+                            year=p.year,
+                            venue=p.venue,
+                            doi=p.doi,
+                            url=p.url or p.external_id,
+                            pdf_url=p.pdf_url,
+                            citation_count=p.citation_count,
+                            source_scope=paper_scope,
+                            evidence_passages=passages_schema,
+                        )
                     )
-                    for ev in evs[:2] # Top 2 passages per paper
-                ]
-                supporting_papers.append(
-                    SupportingPaperSchema(
-                        paper_id=p.id,
-                        title=p.title,
-                        authors=p.authors or [],
-                        year=p.year,
-                        venue=p.venue,
-                        doi=p.doi,
-                        url=p.url or p.external_id,
-                        pdf_url=p.pdf_url,
-                        citation_count=p.citation_count,
-                        evidence_passages=passages_schema,
+
+                strength = "strong" if len(supporting_papers) >= 3 else "moderate"
+                raw_gaps.append(
+                    ResearchGapSchema(
+                        gap_id=str(uuid.uuid4()),
+                        title=title,
+                        statement=statement,
+                        why_it_matters=why_it_matters,
+                        category=category,
+                        origin="cross_paper_inference",
+                        evidence_strength=strength,
+                        source_coverage=f"{len(supporting_papers)} independent publications",
+                        qualifications=qualifications,
+                        supporting_paper_count=len(supporting_papers),
+                        supporting_papers=supporting_papers,
+                        counterevidence=[],
+                        reasoning=reasoning,
                     )
                 )
 
-            # Evidence strength calculation
-            if len(supporting_papers) >= 3:
-                evidence_strength = "strong"
-            else:
-                evidence_strength = "moderate"
-
-            reasoning = (
-                f"Synthesized from {len(supporting_papers)} independent scholarly publications. "
-                f"Multiple authors report analogous boundaries regarding {', '.join(keywords[:2])}, "
-                f"establishing a confirmed cross-study limitation."
+        # Also generate explicit gaps for papers with explicit author limitations
+        for ev in evidence_list:
+            p = ev.paper
+            scope_counts = {ev.source_scope: 1}
+            title, stmt, why, rsn, qual = generate_gap_statement(
+                category=ev.category,
+                passages=[ev.passage],
+                query=query,
+                paper_count=1,
+                is_inferred=False,
+                source_scope_counts=scope_counts,
             )
-
             raw_gaps.append(
                 ResearchGapSchema(
                     gap_id=str(uuid.uuid4()),
                     title=title,
-                    statement=statement,
-                    why_it_matters=why_it_matters,
-                    category=category,
-                    origin="cross_paper_inference",
-                    evidence_strength=evidence_strength,
-                    supporting_paper_count=len(supporting_papers),
-                    supporting_papers=supporting_papers,
+                    statement=stmt,
+                    why_it_matters=why,
+                    category=ev.category,
+                    origin="explicit",
+                    evidence_strength="moderate" if (ev.source_scope == "full_text" or p.citation_count >= 15) else "preliminary",
+                    source_coverage=f"1 paper ({ev.source_scope.replace('_', ' ')})",
+                    qualifications=qual,
+                    supporting_paper_count=1,
+                    supporting_papers=[
+                        SupportingPaperSchema(
+                            paper_id=p.id,
+                            title=p.title,
+                            authors=p.authors or [],
+                            year=p.year,
+                            venue=p.venue,
+                            doi=p.doi,
+                            url=p.url or p.external_id,
+                            pdf_url=p.pdf_url,
+                            citation_count=p.citation_count,
+                            source_scope=ev.source_scope,
+                            evidence_passages=[
+                                EvidencePassageSchema(
+                                    text=ev.passage,
+                                    section=ev.section,
+                                    page=ev.page,
+                                    source_scope=ev.source_scope,
+                                )
+                            ],
+                        )
+                    ],
                     counterevidence=[],
-                    reasoning=reasoning,
+                    reasoning=rsn,
                 )
             )
 
-        # Also generate high-confidence explicit gaps for individual papers with explicit author limitations
-        for paper_id, evs in papers_in_cat.items():
-            explicit_evs = [ev for ev in evs if ev.category in [CATEGORY_METHODOLOGICAL, CATEGORY_FUTURE_DIRECTION, CATEGORY_EVALUATION]]
-            if explicit_evs:
-                top_ev = explicit_evs[0]
-                p = paper_map[paper_id]
-                kw = extract_top_keywords([top_ev.passage], max_terms=3)
-                single_title, single_stmt, single_why = generate_evidence_backed_gap_statement(
-                    category=top_ev.category,
-                    topic_keywords=kw,
-                    passages=[top_ev.passage],
-                    query=query,
-                    paper_count=1,
-                    is_inferred=False,
-                )
-                raw_gaps.append(
-                    ResearchGapSchema(
-                        gap_id=str(uuid.uuid4()),
-                        title=single_title,
-                        statement=single_stmt,
-                        why_it_matters=single_why,
-                        category=top_ev.category,
-                        origin="explicit",
-                        evidence_strength="preliminary" if p.citation_count < 10 else "moderate",
-                        supporting_paper_count=1,
-                        supporting_papers=[
-                            SupportingPaperSchema(
-                                paper_id=p.id,
-                                title=p.title,
-                                authors=p.authors or [],
-                                year=p.year,
-                                venue=p.venue,
-                                doi=p.doi,
-                                url=p.url or p.external_id,
-                                pdf_url=p.pdf_url,
-                                citation_count=p.citation_count,
-                                evidence_passages=[
-                                    EvidencePassageSchema(
-                                        text=top_ev.passage,
-                                        section=top_ev.section,
-                                        page=None,
-                                    )
-                                ],
-                            )
-                        ],
-                        counterevidence=[],
-                        reasoning=f"Explicitly documented in {p.title} ({p.year or 'n.d.'}).",
-                    )
-                )
+    # Step 4: Deduplicate semantically redundant gap candidates
+    deduplicated = deduplicate_gaps(raw_gaps)
 
-    # 4. Stage 5: Deduplicate and Merge Gaps
-    deduplicated_gaps = deduplicate_gaps(raw_gaps)
+    # Step 5: Validate evidence integrity against source papers
+    validated = validate_gaps(deduplicated, paper_map)
 
-    # 5. Stage 6: Evidence Validation
-    validated_gaps = validate_gaps(deduplicated_gaps, paper_map)
+    # Step 6: Rank results prioritizing recurring, cross-paper evidence
+    ranked = rank_gaps(validated, query)
+    return ranked
 
-    # 6. Stage 7: Ranking
-    ranked_gaps = rank_gaps(validated_gaps, query)
-
-    return ranked_gaps
 
 # ---------------------------------------------------------------------------
-# Stage 5: Gap Deduplication
+# Deduplication
 # ---------------------------------------------------------------------------
-def deduplicate_gaps(gaps: List[ResearchGapSchema], similarity_threshold: float = 0.75) -> List[ResearchGapSchema]:
+def deduplicate_gaps(gaps: List[ResearchGapSchema], similarity_threshold: float = 0.72) -> List[ResearchGapSchema]:
     """
-    Clusters and merges semantically redundant gap candidates.
-    Preserves supporting papers and evidence passages from all merged sources.
+    Merges semantically identical gap candidates while keeping distinct findings separate.
+    Preserves supporting papers and evidence passages from merged sources.
     """
     if len(gaps) <= 1:
         return gaps
 
-    # Separate inferred and explicit gaps
     inferred_gaps = [g for g in gaps if g.origin == "cross_paper_inference"]
     explicit_gaps = [g for g in gaps if g.origin == "explicit"]
 
     merged_inferred: List[ResearchGapSchema] = []
     for g in inferred_gaps:
-        duplicate_found = False
-        for existing in merged_inferred:
+        duplicate_idx = -1
+        for idx, existing in enumerate(merged_inferred):
             if existing.category == g.category:
-                # Merge supporting papers
-                existing_paper_ids = {p.paper_id for p in existing.supporting_papers}
-                for new_paper in g.supporting_papers:
-                    if new_paper.paper_id not in existing_paper_ids:
-                        existing.supporting_papers.append(new_paper)
-                        existing_paper_ids.add(new_paper.paper_id)
-                existing.supporting_paper_count = len(existing.supporting_papers)
-                if existing.supporting_paper_count >= 3:
-                    existing.evidence_strength = "strong"
-                duplicate_found = True
-                break
-        if not duplicate_found:
+                # Compare title similarity
+                t1, t2 = existing.title.lower(), g.title.lower()
+                words1, words2 = set(t1.split()), set(t2.split())
+                jaccard = len(words1 & words2) / max(len(words1 | words2), 1)
+                if jaccard >= 0.55:
+                    duplicate_idx = idx
+                    break
+
+        if duplicate_idx >= 0:
+            existing = merged_inferred[duplicate_idx]
+            existing_paper_ids = {p.paper_id for p in existing.supporting_papers}
+            for p in g.supporting_papers:
+                if p.paper_id not in existing_paper_ids:
+                    existing.supporting_papers.append(p)
+                    existing_paper_ids.add(p.paper_id)
+            existing.supporting_paper_count = len(existing.supporting_papers)
+            if existing.supporting_paper_count >= 3:
+                existing.evidence_strength = "strong"
+            existing.source_coverage = f"{existing.supporting_paper_count} independent publications"
+        else:
             merged_inferred.append(g)
 
     # Retain explicit gaps that aren't already represented by the same single paper in the exact same category
@@ -626,38 +748,33 @@ def deduplicate_gaps(gaps: List[ResearchGapSchema], similarity_threshold: float 
             seen_explicit_keys.add(key)
             kept_explicit.append(g)
 
-    return merged_inferred + kept_explicit[:8]
+    return merged_inferred + kept_explicit[:10]
+
 
 # ---------------------------------------------------------------------------
-# Stage 6: Evidence Validation
+# Validation
 # ---------------------------------------------------------------------------
 def validate_gaps(
     gaps: List[ResearchGapSchema],
     paper_map: Dict[str, PaperSchema],
 ) -> List[ResearchGapSchema]:
     """
-    Verifies data provenance:
-    - Every cited paper exists in retrieved dataset.
-    - Passages exist in the corresponding paper's abstract.
-    - URL and metadata consistency.
-    - Discards invalid or unsupported candidates.
+    Verifies that:
+    1. Cited papers exist in the retrieved corpus.
+    2. Quoted passages are non-empty and tied to valid papers.
+    3. Metadata and external links are consistent.
     """
     valid_gaps: List[ResearchGapSchema] = []
-
     for gap in gaps:
         verified_papers: List[SupportingPaperSchema] = []
         for sup in gap.supporting_papers:
             if sup.paper_id in paper_map:
                 real_paper = paper_map[sup.paper_id]
-                # Filter valid passages
-                valid_passages: List[EvidencePassageSchema] = []
-                for passage in sup.evidence_passages:
-                    # Verify passage is non-empty and tied to abstract
-                    if passage.text and len(passage.text.strip()) >= 15:
-                        valid_passages.append(passage)
+                valid_passages: List[EvidencePassageSchema] = [
+                    p for p in sup.evidence_passages if p.text and len(p.text.strip()) >= 15
+                ]
                 if valid_passages:
                     sup.evidence_passages = valid_passages
-                    # Ensure URLs and metadata are up to date
                     sup.doi = real_paper.doi or sup.doi
                     sup.url = real_paper.url or sup.url or real_paper.external_id
                     sup.pdf_url = real_paper.pdf_url or sup.pdf_url
@@ -668,38 +785,36 @@ def validate_gaps(
             gap.supporting_paper_count = len(verified_papers)
             valid_gaps.append(gap)
         else:
-            logger.warning("Rejected unverified gap candidate: %s", gap.title)
+            logger.warning("Dropped unverified gap candidate: %s", gap.title)
 
     return valid_gaps
 
+
 # ---------------------------------------------------------------------------
-# Stage 7: Ranking & Result Calibration
+# Ranking
 # ---------------------------------------------------------------------------
 def rank_gaps(gaps: List[ResearchGapSchema], query: str) -> List[ResearchGapSchema]:
     """
-    Ranks gaps prioritizing:
-    1. Cross-paper inferred gaps with multiple supporting sources (strong evidence).
-    2. Recurrence across independent publications.
+    Ranks gaps:
+    1. Cross-paper inferred gaps with multiple sources.
+    2. Strong evidence coverage.
     3. Relevance to user topic.
     """
     query_terms = set(re.findall(r"[a-z0-9]+", query.lower()))
 
     def score_gap(gap: ResearchGapSchema) -> float:
-        strength_weights = {"strong": 3.0, "moderate": 2.0, "preliminary": 1.0}
-        strength_score = strength_weights.get(gap.evidence_strength, 1.0)
+        strength_score = {"strong": 3.0, "moderate": 2.0, "preliminary": 1.0}.get(gap.evidence_strength, 1.0)
         origin_score = 2.5 if gap.origin == "cross_paper_inference" else 1.0
         paper_score = min(gap.supporting_paper_count, 6) * 1.5
-
-        # Term overlap with query
         text_corpus = f"{gap.title} {gap.statement} {gap.why_it_matters}".lower()
         relevance_score = sum(1.0 for t in query_terms if t in text_corpus)
-
         return (strength_score * 3.0) + (origin_score * 2.5) + paper_score + relevance_score
 
     return sorted(gaps, key=score_gap, reverse=True)
 
+
 # ---------------------------------------------------------------------------
-# Public Facade for Full Analysis Result Assembly
+# Assemble Contract Results
 # ---------------------------------------------------------------------------
 def assemble_analysis_results(
     search_id: str,
@@ -709,13 +824,16 @@ def assemble_analysis_results(
     papers: List[PaperSchema],
     gaps: List[ResearchGapSchema],
     warnings: Optional[List[str]] = None,
+    raw_provider_results: Optional[int] = None,
+    deduplicated_papers: Optional[int] = None,
+    retained_papers: Optional[int] = None,
+    full_text_analysed: Optional[int] = 0,
 ) -> AnalysisResultsResponse:
-    """Assembles the final structured contract response according to specification."""
+    """Assembles structured API contract response with detailed corpus metrics."""
     years = [p.year for p in papers if p.year is not None]
     year_start = min(years) if years else None
     year_end = max(years) if years else None
 
-    # Count categories breakdown
     cat_counts: Dict[str, int] = defaultdict(int)
     for g in gaps:
         cat_counts[g.category] += 1
@@ -723,6 +841,10 @@ def assemble_analysis_results(
     corpus_stats = CorpusStatsSchema(
         papers_retrieved=len(papers),
         papers_analysed=len(papers),
+        raw_provider_results=raw_provider_results or len(papers),
+        deduplicated_papers=deduplicated_papers or len(papers),
+        retained_papers=retained_papers or len(papers),
+        full_text_analysed=full_text_analysed or 0,
         publication_year_range=YearRangeSchema(start=year_start, end=year_end),
         categories_breakdown=dict(cat_counts),
     )

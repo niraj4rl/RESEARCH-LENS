@@ -55,3 +55,21 @@ def test_analyze_and_results_flow():
 def test_nonexistent_analysis_returns_404():
     res = client.get("/api/research/non-existent-uuid-1234")
     assert res.status_code == 404
+
+def test_retrieval_provider_failures(monkeypatch):
+    """Ensure that when a provider raises an exception, the system catches it gracefully."""
+    from providers.openalex import OpenAlexProvider
+    from providers.arxiv import ArxivProvider
+    
+    # Mock OpenAlex to raise a simulated network connection failure
+    def failing_search(*args, **kwargs):
+        raise ConnectionError("Simulated OpenAlex server outage")
+        
+    monkeypatch.setattr(OpenAlexProvider, "search_papers", failing_search)
+    
+    # Analysis should still accept the request and survive provider failure
+    res = client.post("/api/research/analyze", json={"query": "quantum computing", "limit": 10})
+    assert res.status_code == 202
+    data = res.json()
+    assert "id" in data
+

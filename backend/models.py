@@ -31,6 +31,10 @@ class Analysis(Base):
     # Corpus summary metadata
     papers_retrieved = Column(Integer, default=0)
     papers_analysed = Column(Integer, default=0)
+    raw_provider_results = Column(Integer, default=0)
+    deduplicated_papers = Column(Integer, default=0)
+    retained_papers = Column(Integer, default=0)
+    full_text_analysed = Column(Integer, default=0)
     year_start = Column(Integer, nullable=True)
     year_end = Column(Integer, nullable=True)
 
@@ -94,6 +98,8 @@ class ResearchGap(Base):
     origin = Column(String, default="cross_paper_inference") # explicit vs cross_paper_inference
     evidence_strength = Column(String, default="moderate") # strong, moderate, preliminary
     supporting_paper_count = Column(Integer, default=1)
+    source_coverage = Column(Text, nullable=True)
+    qualifications = Column(Text, nullable=True)
     reasoning = Column(Text, nullable=True)
     counterevidence = Column(Text, nullable=True) # JSON string if present
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -109,6 +115,7 @@ class GapEvidence(Base):
     passage = Column(Text, nullable=False)
     section = Column(String, default="Limitations")
     page = Column(Integer, nullable=True)
+    source_scope = Column(String, default="abstract_only") # abstract_only vs full_text
     relevance_note = Column(Text, nullable=True)
     
     gap = relationship("ResearchGap", back_populates="evidence")

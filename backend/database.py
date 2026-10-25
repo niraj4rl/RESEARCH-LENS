@@ -76,6 +76,10 @@ def migrate_schema(eng):
                 "failed_stage": "VARCHAR(50)",
                 "papers_retrieved": "INTEGER DEFAULT 0",
                 "papers_analysed": "INTEGER DEFAULT 0",
+                "raw_provider_results": "INTEGER DEFAULT 0",
+                "deduplicated_papers": "INTEGER DEFAULT 0",
+                "retained_papers": "INTEGER DEFAULT 0",
+                "full_text_analysed": "INTEGER DEFAULT 0",
                 "year_start": "INTEGER",
                 "year_end": "INTEGER",
             }
@@ -83,6 +87,23 @@ def migrate_schema(eng):
                 for col_name, definition in analyses_defs.items():
                     if col_name not in existing_cols:
                         conn.execute(text(f'ALTER TABLE analyses ADD COLUMN "{col_name}" {definition}'))
+
+        if "research_gaps" in tables:
+            existing_cols = {col["name"] for col in inspector.get_columns("research_gaps")}
+            gap_defs = {
+                "source_coverage": "TEXT",
+                "qualifications": "TEXT",
+            }
+            with eng.begin() as conn:
+                for col_name, definition in gap_defs.items():
+                    if col_name not in existing_cols:
+                        conn.execute(text(f'ALTER TABLE research_gaps ADD COLUMN "{col_name}" {definition}'))
+
+        if "gap_evidence" in tables:
+            existing_cols = {col["name"] for col in inspector.get_columns("gap_evidence")}
+            if "source_scope" not in existing_cols:
+                with eng.begin() as conn:
+                    conn.execute(text('ALTER TABLE gap_evidence ADD COLUMN "source_scope" VARCHAR(50) DEFAULT \'abstract_only\''))
 
         if "research_papers" in tables:
             existing_cols = {col["name"] for col in inspector.get_columns("research_papers")}

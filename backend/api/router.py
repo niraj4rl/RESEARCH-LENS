@@ -152,6 +152,24 @@ def run_analysis_task(
         # Deduplicate papers by normalized title and DOI with semantic relevance ranking
         seen_titles: set[str] = set()
         seen_dois: set[str] = set()
+        raw_count = len(all_papers_data)
+        
+        # Deduplication step
+        deduped_candidates: list[PaperSchema] = []
+        for p in all_papers_data:
+            doi_key = (p.doi or "").strip().lower()
+            if doi_key and doi_key in seen_dois:
+                continue
+            title_key = re.sub(r"[^a-z0-9]", "", (p.title or "").lower())
+            if not title_key or title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+            if doi_key:
+                seen_dois.add(doi_key)
+            deduped_candidates.append(p)
+
+        deduped_count = len(deduped_candidates)
+
         clean_q = retrieval_query.lower().strip()
         query_terms = [
             term
@@ -161,8 +179,8 @@ def run_analysis_task(
 
         # Semantic relevance filtering via TF-IDF cosine similarity
         filtered_candidates: list[PaperSchema] = []
-        if all_papers_data:
-            corpus_texts = [f"{p.title or ''} {p.abstract or ''}".lower() for p in all_papers_data]
+        if deduped_candidates:
+            corpus_texts = [f"{p.title or ''} {p.abstract or ''}".lower() for p in deduped_candidates]
             try:
                 from sklearn.feature_extraction.text import TfidfVectorizer
                 from sklearn.metrics.pairwise import cosine_similarity
@@ -171,21 +189,21 @@ def run_analysis_task(
                 q_vec = tfidf.transform([clean_q])
                 scores = cosine_similarity(q_vec, mat)[0]
             except Exception:
-                scores = [1.0] * len(all_papers_data)
+                scores = [1.0] * len(deduped_candidates)
 
             scored = sorted(
-                zip(all_papers_data, scores),
+                zip(deduped_candidates, scores),
                 key=lambda x: (x[1], x[0].citation_count),
                 reverse=True,
             )
             max_score = max(scores) if len(scores) > 0 else 0.0
             for p_cand, score in scored:
                 # If query has solid matches elsewhere, drop semantic outliers below threshold
-                if max_score > 0.15 and score < 0.04:
+                if max_score > 0.15 and score < 0.03:
                     continue
                 filtered_candidates.append(p_cand)
         else:
-            filtered_candidates = all_papers_data
+            filtered_candidates = deduped_candidates
 
         minimum_matches = max(1, math.ceil(len(query_terms) / 3))
 
@@ -198,23 +216,9 @@ def run_analysis_task(
                 if year_max and p_data.year > year_max:
                     continue
 
-            # Check DOI duplicate
-            clean_doi = (p_data.doi or "").strip().lower()
-            if clean_doi and clean_doi in seen_dois:
-                continue
-
-            # Check title duplicate
-            title_key = re.sub(r"[^a-z0-9]", "", (p_data.title or "").lower())
-            if not title_key or title_key in seen_titles:
-                continue
-
             searchable_text = f"{p_data.title or ''} {p_data.abstract or ''}".lower()
             if query_terms and sum(term in searchable_text for term in query_terms) < minimum_matches:
                 continue
-
-            seen_titles.add(title_key)
-            if clean_doi:
-                seen_dois.add(clean_doi)
 
             existing = (
                 db.query(Paper)
@@ -257,7 +261,10 @@ def run_analysis_task(
         db.commit()
 
         # Update stats on analysis
-        analysis.papers_retrieved = len(all_papers_data)
+        analysis.raw_provider_results = raw_count
+        analysis.deduplicated_papers = deduped_count
+        analysis.retained_papers = len(persisted_papers)
+        analysis.papers_retrieved = raw_count
         analysis.papers_analysed = len(persisted_papers)
         years = [p.year for p in persisted_papers if p.year is not None]
         analysis.year_start = min(years) if years else None
@@ -311,6 +318,8 @@ def run_analysis_task(
         db.query(ResearchGap).filter(ResearchGap.analysis_id == analysis_id).delete(synchronize_session=False)
         db.commit()
 
+        full_text_paper_ids: set[str] = set()
+
         # Persist synthesized gaps and evidence
         for gap_data in synthesized_gaps:
             gap_orm = ResearchGap(
@@ -323,12 +332,16 @@ def run_analysis_task(
                 origin=gap_data.origin,
                 evidence_strength=gap_data.evidence_strength,
                 supporting_paper_count=gap_data.supporting_paper_count,
+                source_coverage=gap_data.source_coverage,
+                qualifications=gap_data.qualifications,
                 reasoning=gap_data.reasoning,
             )
             db.add(gap_orm)
             db.flush()
 
             for sup in gap_data.supporting_papers:
+                if sup.source_scope == "full_text":
+                    full_text_paper_ids.add(sup.paper_id)
                 for passage in sup.evidence_passages:
                     ev_orm = GapEvidence(
                         id=str(uuid.uuid4()),
@@ -337,9 +350,11 @@ def run_analysis_task(
                         passage=passage.text,
                         section=passage.section or "Limitations",
                         page=passage.page,
+                        source_scope=passage.source_scope or "abstract_only",
                     )
                     db.add(ev_orm)
 
+        analysis.full_text_analysed = len(full_text_paper_ids)
         analysis.status = "completed"
         analysis.stage = "completed"
         analysis.error_message = None
@@ -414,10 +429,21 @@ def analyze(
 
 @router.get("/{analysis_id}", response_model=AnalysisResponse)
 def get_analysis_status(analysis_id: str, db: Session = Depends(get_db)):
-    """Returns the current processing status and live stage of an analysis job."""
+    """Returns the current processing status and live stage of an analysis job with stale recovery."""
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found.")
+
+    # Stale job recovery: if pending/running for > 5 minutes, mark as timed-out
+    if analysis.status in {"pending", "running"}:
+        age_seconds = (datetime.utcnow() - analysis.created_at).total_seconds()
+        if age_seconds > 300:
+            analysis.status = "failed"
+            analysis.stage = "failed"
+            analysis.failed_stage = analysis.stage
+            analysis.error_message = "Analysis timed out while processing scholarly literature. Please retry with more specific keywords."
+            db.commit()
+
     return analysis
 
 
@@ -430,6 +456,16 @@ def get_analysis_results(analysis_id: str, db: Session = Depends(get_db)):
     analysis = db.query(Analysis).filter(Analysis.id == analysis_id).first()
     if not analysis:
         raise HTTPException(status_code=404, detail="Analysis not found.")
+
+    # Stale job recovery
+    if analysis.status in {"pending", "running"}:
+        age_seconds = (datetime.utcnow() - analysis.created_at).total_seconds()
+        if age_seconds > 300:
+            analysis.status = "failed"
+            analysis.stage = "failed"
+            analysis.failed_stage = analysis.stage
+            analysis.error_message = "Analysis timed out while processing scholarly literature. Please retry with more specific keywords."
+            db.commit()
 
     papers = db.query(Paper).filter(Paper.analysis_id == analysis_id).all()
     paper_map = {p.id: p for p in papers}
@@ -451,6 +487,7 @@ def get_analysis_results(analysis_id: str, db: Session = Depends(get_db)):
                     text=ev.passage,
                     section=ev.section or "Limitations",
                     page=ev.page,
+                    source_scope=getattr(ev, "source_scope", "abstract_only") or "abstract_only",
                 )
             )
 
@@ -458,6 +495,7 @@ def get_analysis_results(analysis_id: str, db: Session = Depends(get_db)):
         for pid, passages in paper_ev_map.items():
             if pid in paper_map:
                 p = paper_map[pid]
+                paper_scope = "full_text" if any(psg.source_scope == "full_text" for psg in passages) else "abstract_only"
                 supporting_papers.append(
                     SupportingPaperSchema(
                         paper_id=p.id,
@@ -469,6 +507,7 @@ def get_analysis_results(analysis_id: str, db: Session = Depends(get_db)):
                         url=p.url or p.external_id,
                         pdf_url=p.pdf_url,
                         citation_count=p.citation_count,
+                        source_scope=paper_scope,
                         evidence_passages=passages,
                     )
                 )
@@ -482,6 +521,8 @@ def get_analysis_results(analysis_id: str, db: Session = Depends(get_db)):
                 category=g.category,
                 origin=g.origin,
                 evidence_strength=g.evidence_strength,
+                source_coverage=g.source_coverage,
+                qualifications=g.qualifications,
                 supporting_paper_count=len(supporting_papers) or g.supporting_paper_count,
                 supporting_papers=supporting_papers,
                 counterevidence=[],
@@ -524,6 +565,10 @@ def get_analysis_results(analysis_id: str, db: Session = Depends(get_db)):
         corpus=CorpusStatsSchema(
             papers_retrieved=analysis.papers_retrieved or len(papers),
             papers_analysed=analysis.papers_analysed or len(papers),
+            raw_provider_results=analysis.raw_provider_results or analysis.papers_retrieved or len(papers),
+            deduplicated_papers=analysis.deduplicated_papers or len(papers),
+            retained_papers=analysis.retained_papers or len(papers),
+            full_text_analysed=analysis.full_text_analysed or 0,
             publication_year_range=YearRangeSchema(start=year_start, end=year_end),
             categories_breakdown=dict(cat_counts),
         ),

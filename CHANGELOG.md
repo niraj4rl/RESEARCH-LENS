@@ -2,6 +2,19 @@
 
 All notable changes made to ResearchLens as part of the editorial redesign and production-hardening initiative.
 
+## [2.1.0] - 2026-10-25
+
+### Gap Engine & Analysis Overhaul
+- **Strict Evidence Extraction**: Completely removed the fallback that automatically treated final sentences of abstracts as future research. Sentences are only classified as future work when explicit future-direction cues are present.
+- **Author Limitation vs Cross-Paper Inference**: Strictly distinguishes explicit author limitations (`origin="explicit"`) from multi-paper inferred gaps (`origin="cross_paper_inference"`).
+- **Semantic Sub-Clustering**: Requires meaningful semantic relationships (TF-IDF cosine similarity $\ge 0.15$) between supporting passages before synthesizing a cross-paper gap. Papers sharing only a broad taxonomy category are never falsely merged.
+- **Measured Scholarly Tone**: Eliminated all overclaiming statements (e.g. "confirmed cross-study limitation", "established fact"). Replaced with measured scholarly prose and transparent empirical qualifications.
+- **Full-Text Analysis Pipeline**: Integrated `backend/full_text.py` using `pypdf` to inspect accessible open-access full-text PDFs for high-priority sections (`Limitations`, `Discussion`, `Future Work`, `Evaluation`, `Methodology`, `Datasets`). Records `source_scope` (`full_text` vs `abstract_only`) per passage and paper.
+- **Accurate Corpus Metrics**: Accurately tracks and displays `raw_provider_results`, `deduplicated_papers`, `retained_papers`, and `full_text_analysed` across provider runs.
+- **Stale Job Recovery**: Automatically detects and recovers analysis jobs stalled longer than 5 minutes.
+- **Responsive Gap Card Grid**: Results view features a responsive grid of research-gap cards with concise statements, clickable paper titles, category, origin, and an enriched evidence inspection drawer with empirical qualifications.
+- **Full Regression Test Suite**: 14 automated tests covering zero-limitation abstracts, explicit limitations, unrelated limitations in same category, genuine recurring limitations, contradictory evidence, missing full text, invalid passages, candidate deduplication, and provider failure resilience.
+
 ## [2.0.0] - 2026-10-25
 
 ### Design Direction & Aesthetic ("Quiet Research Library at Night")
