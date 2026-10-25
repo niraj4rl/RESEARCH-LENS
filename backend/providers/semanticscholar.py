@@ -1,3 +1,4 @@
+import os
 import requests
 import uuid
 from typing import List
@@ -13,13 +14,17 @@ class SemanticScholarProvider(ScholarProvider):
             "limit": limit,
             "fields": "title,authors,year,venue,abstract,citationCount,isOpenAccess,url,externalIds,openAccessPdf"
         }
+        headers = {}
+        api_key = os.getenv("SEMANTIC_SCHOLAR_API_KEY") or os.getenv("S2_API_KEY")
+        if api_key:
+            headers["x-api-key"] = api_key
         
         try:
             # S2 often rate limits heavily for free tiers, timeout handles blocking
-            response = requests.get(self.BASE_URL, params=params, timeout=10)
+            response = requests.get(self.BASE_URL, params=params, headers=headers, timeout=10)
             response.raise_for_status()
         except requests.RequestException:
-            # Fallback gracefully if S2 rate limits us
+            # Fallback gracefully if S2 rate limits us or returns 429
             return []
             
         data = response.json()

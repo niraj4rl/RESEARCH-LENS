@@ -10,7 +10,7 @@ interface LoadingStepperProps {
 }
 
 const STAGES = [
-  { id: "retrieving", label: "Retrieving literature across OpenAlex & arXiv", detail: "Querying peer-reviewed repositories" },
+  { id: "retrieving", label: "Retrieving literature across OpenAlex, arXiv & Semantic Scholar", detail: "Querying peer-reviewed repositories" },
   { id: "analyzing", label: "Extracting evidence & limitations", detail: "Parsing problem formulations, constraints & benchmarks" },
   { id: "synthesizing", label: "Synthesising cross-paper research gaps", detail: "Clustering recurring constraints across independent studies" },
   { id: "validating", label: "Verifying citation provenance", detail: "Grounding claims directly in verified paper passages" },
