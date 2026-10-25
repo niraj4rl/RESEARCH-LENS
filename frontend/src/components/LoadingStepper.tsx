@@ -43,7 +43,6 @@ export function LoadingStepper({
         {STAGES.map((s, idx) => {
           const isDone = currentIdx > idx;
           const isActive = currentIdx === idx;
-          const isPending = currentIdx < idx;
 
           return (
             <div key={s.id} className="relative group">

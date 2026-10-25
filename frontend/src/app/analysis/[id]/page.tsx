@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, use, useMemo, useRef, useCallback } from "react";
+import { useEffect, useState, use, useMemo, useRef } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "motion/react";
@@ -9,6 +9,7 @@ import { EvidenceMeter } from "@/components/EvidenceMeter";
 import { LoadingStepper } from "@/components/LoadingStepper";
 import { ExportMenu } from "@/components/ExportMenu";
 import { KeyboardShortcutsModal } from "@/components/KeyboardShortcutsModal";
+import { GapCard } from "@/components/GapCard";
 
 interface EvidencePassage {
   text: string;
@@ -178,9 +179,10 @@ export default function AnalysisResultsPage({
   }, [id, results?.status]);
 
   // Filtered gaps list
+  const gaps = results?.gaps;
   const filteredGaps = useMemo(() => {
-    if (!results?.gaps) return [];
-    return results.gaps.filter((gap) => {
+    if (!gaps) return [];
+    return gaps.filter((gap) => {
       if (categoryFilter !== "all" && gap.category !== categoryFilter) return false;
       if (strengthFilter !== "all" && gap.evidence_strength !== strengthFilter) return false;
       if (originFilter !== "all" && gap.origin !== originFilter) return false;
@@ -191,7 +193,7 @@ export default function AnalysisResultsPage({
       }
       return true;
     });
-  }, [results?.gaps, categoryFilter, strengthFilter, originFilter, searchFilter]);
+  }, [gaps, categoryFilter, strengthFilter, originFilter, searchFilter]);
 
   // Keyboard navigation
   useEffect(() => {
@@ -326,7 +328,7 @@ export default function AnalysisResultsPage({
         )}
 
         {/* Failed State */}
-        {results?.status === "failed" && (
+        {(errorMessage || results?.status === "failed") && (
           <div className="py-20 max-w-lg mx-auto text-left space-y-4">
             <span className="text-xs font-mono text-[var(--color-text-faint)] uppercase tracking-wider block">
               Analysis Interrupted
@@ -335,7 +337,7 @@ export default function AnalysisResultsPage({
               Unable to complete literature synthesis
             </h2>
             <p className="text-[14px] text-[var(--color-text-muted)] leading-relaxed">
-              {results.warnings[0] || "Retrieval or synthesis pipeline failed unexpectedly."}
+              {errorMessage || results?.warnings?.[0] || "Retrieval or synthesis pipeline failed unexpectedly."}
             </p>
             <div className="pt-2 flex items-center gap-3">
               <button
@@ -501,114 +503,19 @@ export default function AnalysisResultsPage({
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pt-2">
-                {filteredGaps.map((gap, idx) => {
-                  const isActive = activeRowIndex === idx;
-                  const indexLabel = String(idx + 1).padStart(2, "0");
-                  const catLabel = CATEGORY_NAMES[gap.category] || "Open Gap";
-                  const originLabel = gap.origin === "cross_paper_inference" ? "Inferred" : "Author-reported";
-
-                  return (
-                    <motion.div
-                      key={gap.gap_id}
-                      initial={{ opacity: 0, y: 12 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.24, delay: Math.min(idx * 0.04, 0.4) }}
-                      onClick={() => {
-                        setActiveRowIndex(idx);
-                        setSelectedGap(gap);
-                      }}
-                      className={`group p-5 rounded-[8px] border transition-all cursor-pointer flex flex-col justify-between space-y-4 ${
-                        isActive
-                          ? "bg-[var(--color-surface)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]"
-                          : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-[var(--color-accent)]"
-                      }`}
-                      tabIndex={0}
-                      role="button"
-                      aria-label={`Gap ${indexLabel}: ${gap.title}`}
-                    >
-                      {/* Top Meta Row */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-[12px]">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-[var(--color-text-faint)] text-[11px] tabular-nums">
-                              {indexLabel}
-                            </span>
-                            <span className="font-medium text-[var(--color-text)]">
-                              {catLabel}
-                            </span>
-                            <span className="text-[var(--color-text-faint)]">·</span>
-                            <span className="text-[var(--color-text-muted)] text-[11px]">
-                              {originLabel}
-                            </span>
-                          </div>
-                          <EvidenceMeter strength={gap.evidence_strength} />
-                        </div>
-
-                        {/* Gap Title */}
-                        <h3 className="text-[17px] font-serif-editorial text-[var(--color-text)] group-hover:text-[var(--color-accent)] transition-colors leading-snug">
-                          {gap.title}
-                        </h3>
-
-                        {/* Concise Gap Statement (Clamped) */}
-                        <p className="text-[13.5px] text-[var(--color-text-muted)] line-clamp-3 leading-relaxed">
-                          {gap.statement}
-                        </p>
-                      </div>
-
-                      {/* Supporting Paper Information & Clickable Paper Titles */}
-                      <div className="pt-2 border-t border-[var(--color-border-subtle)] space-y-2">
-                        <div className="text-[11px] font-mono text-[var(--color-text-faint)] flex items-center justify-between">
-                          <span>
-                            {gap.supporting_paper_count} {gap.supporting_paper_count === 1 ? "paper" : "papers"}
-                          </span>
-                          {gap.source_coverage && (
-                            <span className="truncate max-w-[150px]">{gap.source_coverage}</span>
-                          )}
-                        </div>
-
-                        {/* Clickable paper links */}
-                        <div className="space-y-1">
-                          {gap.supporting_papers.slice(0, 2).map((p) => {
-                            const verifiedLink = p.doi ? `https://doi.org/${p.doi}` : p.url || p.pdf_url;
-                            return (
-                              <div key={p.paper_id} className="text-[12px] truncate">
-                                {verifiedLink ? (
-                                  <a
-                                    href={verifiedLink}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    onClick={(e) => e.stopPropagation()}
-                                    className="text-[var(--color-text-muted)] hover:text-[var(--color-accent)] hover:underline inline-flex items-center gap-1 truncate max-w-full"
-                                    title={p.title}
-                                  >
-                                    <span className="shrink-0 text-[10px]">↗</span>
-                                    <span className="truncate">{p.title}</span>
-                                    {p.year && <span className="text-[var(--color-text-faint)] shrink-0">({p.year})</span>}
-                                  </a>
-                                ) : (
-                                  <span className="text-[var(--color-text-muted)] truncate block" title={p.title}>
-                                    • {p.title} {p.year && `(${p.year})`}
-                                  </span>
-                                )}
-                              </div>
-                            );
-                          })}
-                          {gap.supporting_papers.length > 2 && (
-                            <span className="text-[11px] text-[var(--color-text-faint)] block">
-                              +{gap.supporting_papers.length - 2} more supporting {gap.supporting_papers.length - 2 === 1 ? "study" : "studies"}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* Card Action */}
-                        <div className="pt-2 flex items-center justify-between text-[12px] text-[var(--color-text-faint)]">
-                          <span>Inspect evidence</span>
-                          <span className="text-[var(--color-accent)] group-hover:translate-x-1 transition-transform">→</span>
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                })}
+                {filteredGaps.map((gap, idx) => (
+                  <GapCard
+                    key={gap.gap_id}
+                    gap={gap}
+                    index={idx}
+                    isActive={activeRowIndex === idx}
+                    onSelect={() => {
+                      setActiveRowIndex(idx);
+                      setSelectedGap(gap);
+                    }}
+                    categoryNames={CATEGORY_NAMES}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -724,7 +631,6 @@ export default function AnalysisResultsPage({
                 <div className="space-y-3">
                   {selectedGap.supporting_papers.map((paper) => {
                     const isExpanded = expandedPaperIds.has(paper.paper_id);
-                    const verifiedLink = paper.doi ? `https://doi.org/${paper.doi}` : paper.url || paper.pdf_url;
 
                     return (
                       <div

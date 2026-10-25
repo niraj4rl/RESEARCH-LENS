@@ -60,7 +60,9 @@ export default function HomePage() {
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    setRecentTopics(loadRecentTopics());
+    const handle = requestAnimationFrame(() => {
+      setRecentTopics(loadRecentTopics());
+    });
 
     // Global keyboard listener
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -73,7 +75,10 @@ export default function HomePage() {
       }
     };
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    return () => {
+      cancelAnimationFrame(handle);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
   }, []);
 
   const exampleTopics = [
