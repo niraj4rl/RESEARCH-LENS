@@ -36,7 +36,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <head>
+      <body
+        className={`${newsreader.variable} ${inter.variable} ${jetbrainsMono.variable} antialiased selection:bg-[#d9a441]/20`}
+      >
         <script
           dangerouslySetInnerHTML={{
             __html: `
@@ -56,10 +58,6 @@ export default function RootLayout({
             `,
           }}
         />
-      </head>
-      <body
-        className={`${newsreader.variable} ${inter.variable} ${jetbrainsMono.variable} antialiased selection:bg-[#d9a441]/20`}
-      >
         {children}
       </body>
     </html>
