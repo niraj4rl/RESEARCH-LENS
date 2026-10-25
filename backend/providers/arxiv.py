@@ -50,7 +50,29 @@ class ArxivProvider(ScholarProvider):
                         authors.append(name.text)
                         
                 id_tag = entry.find('atom:id', ns)
-                external_id = id_tag.text if id_tag is not None else ""
+                external_id = id_tag.text.strip() if id_tag is not None and id_tag.text else ""
+                
+                # Check for DOI in arxiv namespace
+                arxiv_ns = {'arxiv': 'http://arxiv.org/schemas/atom'}
+                doi_tag = entry.find('arxiv:doi', arxiv_ns)
+                doi = doi_tag.text.strip() if doi_tag is not None and doi_tag.text else None
+                
+                # Extract PDF link or construct from arXiv ID
+                pdf_url = None
+                for link in entry.findall('atom:link', ns):
+                    if link.attrib.get('title') == 'pdf' or link.attrib.get('type') == 'application/pdf':
+                        pdf_url = link.attrib.get('href')
+                        break
+                if not pdf_url and external_id:
+                    pdf_url = external_id.replace('/abs/', '/pdf/')
+                    if not pdf_url.endswith('.pdf'):
+                        pdf_url += '.pdf'
+                
+                url = external_id
+                if url.startswith("http://"):
+                    url = "https://" + url[7:]
+                if pdf_url and pdf_url.startswith("http://"):
+                    pdf_url = "https://" + pdf_url[7:]
                 
                 papers.append(PaperSchema(
                     id=str(uuid.uuid4()),
@@ -61,7 +83,11 @@ class ArxivProvider(ScholarProvider):
                     venue="arXiv",
                     abstract=abstract_text,
                     citation_count=0, # arXiv API doesn't provide citation counts directly
-                    open_access_status="oa" # arXiv is always open access
+                    open_access_status="oa", # arXiv is always open access
+                    doi=doi,
+                    url=url,
+                    pdf_url=pdf_url,
+                    source="arXiv"
                 ))
         except ET.ParseError:
             pass

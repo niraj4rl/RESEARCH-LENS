@@ -34,9 +34,16 @@ class OpenAlexProvider(ScholarProvider):
             authors = [a.get("author", {}).get("display_name") for a in item.get("authorships", []) if a.get("author", {}).get("display_name")]
             abstract = self._reconstruct_abstract(item.get("abstract_inverted_index"))
             
+            primary_loc = item.get("primary_location") or {}
+            source_obj = primary_loc.get("source") or {}
+            raw_doi = item.get("doi")
+            doi_clean = raw_doi.replace("https://doi.org/", "") if raw_doi else None
+            landing_url = primary_loc.get("landing_page_url") or raw_doi or item.get("id")
+            
             # Use OA URL if available, else primary location
             oa = item.get("open_access", {})
             oa_status = oa.get("oa_status", "closed")
+            pdf_url = oa.get("oa_url") or primary_loc.get("pdf_url")
             
             paper = PaperSchema(
                 id=str(uuid.uuid4()),
@@ -44,10 +51,14 @@ class OpenAlexProvider(ScholarProvider):
                 title=item.get("title") or "Untitled",
                 authors=authors,
                 year=item.get("publication_year"),
-                venue=item.get("primary_location", {}).get("source", {}).get("display_name") if item.get("primary_location") and item.get("primary_location").get("source") else None,
+                venue=source_obj.get("display_name") if source_obj else None,
                 abstract=abstract,
                 citation_count=item.get("cited_by_count", 0) or 0,
-                open_access_status=oa_status
+                open_access_status=oa_status,
+                doi=doi_clean,
+                url=landing_url,
+                pdf_url=pdf_url,
+                source="OpenAlex"
             )
             papers.append(paper)
             

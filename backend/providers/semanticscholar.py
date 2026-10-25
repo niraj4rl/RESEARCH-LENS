@@ -11,7 +11,7 @@ class SemanticScholarProvider(ScholarProvider):
         params = {
             "query": query,
             "limit": limit,
-            "fields": "title,authors,year,venue,abstract,citationCount,isOpenAccess,url"
+            "fields": "title,authors,year,venue,abstract,citationCount,isOpenAccess,url,externalIds,openAccessPdf"
         }
         
         try:
@@ -30,7 +30,13 @@ class SemanticScholarProvider(ScholarProvider):
             authors = [a.get("name") for a in item.get("authors", []) if a.get("name")]
             
             paper_id = item.get("paperId")
-            external_id = item.get("url") or (f"https://www.semanticscholar.org/paper/{paper_id}" if paper_id else str(uuid.uuid4()))
+            landing_url = item.get("url") or (f"https://www.semanticscholar.org/paper/{paper_id}" if paper_id else None)
+            external_id = landing_url or str(uuid.uuid4())
+            ext_ids = item.get("externalIds") or {}
+            doi = ext_ids.get("DOI")
+            oa_pdf = item.get("openAccessPdf") or {}
+            pdf_url = oa_pdf.get("url")
+
             papers.append(PaperSchema(
                 id=str(uuid.uuid4()),
                 external_id=external_id,
@@ -40,7 +46,11 @@ class SemanticScholarProvider(ScholarProvider):
                 venue=item.get("venue"),
                 abstract=item.get("abstract") or "",
                 citation_count=item.get("citationCount", 0),
-                open_access_status="oa" if item.get("isOpenAccess") else "closed"
+                open_access_status="oa" if item.get("isOpenAccess") else "closed",
+                doi=doi,
+                url=landing_url,
+                pdf_url=pdf_url,
+                source="Semantic Scholar"
             ))
             
         return papers

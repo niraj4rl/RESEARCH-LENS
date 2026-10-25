@@ -17,22 +17,37 @@ async def lifespan(app: FastAPI):
     try:
         Base.metadata.create_all(bind=engine)
         # create_all does not add columns to an existing table.
-        existing_columns = {
-            column["name"] for column in inspect(engine).get_columns("analyses")
-        }
-        column_definitions = {
-            "stage": "VARCHAR(50) DEFAULT 'queued'",
-            "error_message": "TEXT",
-            "failed_stage": "VARCHAR(50)",
-        }
+        inspector = inspect(engine)
+        if "analyses" in inspector.get_table_names():
+            existing_columns = {col["name"] for col in inspector.get_columns("analyses")}
+            analyses_defs = {
+                "stage": "VARCHAR(50) DEFAULT 'queued'",
+                "error_message": "TEXT",
+                "failed_stage": "VARCHAR(50)",
+                "papers_retrieved": "INTEGER DEFAULT 0",
+                "papers_analysed": "INTEGER DEFAULT 0",
+                "year_start": "INTEGER",
+                "year_end": "INTEGER",
+            }
+            with engine.begin() as connection:
+                for col_name, definition in analyses_defs.items():
+                    if col_name not in existing_columns:
+                        connection.execute(text(f'ALTER TABLE analyses ADD COLUMN "{col_name}" {definition}'))
+
+        if "research_papers" in inspector.get_table_names():
+            existing_paper_cols = {col["name"] for col in inspector.get_columns("research_papers")}
+            paper_defs = {
+                "doi": "VARCHAR(255)",
+                "url": "VARCHAR(1024)",
+                "pdf_url": "VARCHAR(1024)",
+                "source": "VARCHAR(100)",
+            }
+            with engine.begin() as connection:
+                for col_name, definition in paper_defs.items():
+                    if col_name not in existing_paper_cols:
+                        connection.execute(text(f'ALTER TABLE research_papers ADD COLUMN "{col_name}" {definition}'))
+
         with engine.begin() as connection:
-            for column_name, definition in column_definitions.items():
-                if column_name not in existing_columns:
-                    connection.execute(
-                        text(
-                            f'ALTER TABLE analyses ADD COLUMN "{column_name}" {definition}'
-                        )
-                    )
             if engine.dialect.name == "postgresql":
                 connection.execute(text(
                     "ALTER TABLE paper_authors DROP CONSTRAINT IF EXISTS paper_authors_paper_id_fkey"

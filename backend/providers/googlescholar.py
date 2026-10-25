@@ -43,16 +43,22 @@ class GoogleScholarProvider(ScholarProvider):
                     year = int(raw_year) if raw_year is not None else None
                 except (TypeError, ValueError):
                     year = None
+                pub_url = result.get("pub_url")
+                eprint_url = result.get("eprint")
                 papers.append(PaperSchema(
                     id=str(uuid.uuid4()),
-                    external_id=result.get("pub_url") or result.get("eprint") or str(uuid.uuid4()),
+                    external_id=pub_url or eprint_url or str(uuid.uuid4()),
                     title=publication.get("title") or "Untitled",
                     authors=[str(author) for author in authors],
                     year=year,
                     venue=publication.get("venue"),
                     abstract=publication.get("abstract", ""),
                     citation_count=int(result.get("num_citations", 0) or 0),
-                    open_access_status=None,
+                    open_access_status="oa" if eprint_url else None,
+                    doi=None,
+                    url=pub_url,
+                    pdf_url=eprint_url,
+                    source="Google Scholar",
                 ))
         except Exception as exc:
             logger.warning("Google Scholar unavailable (CAPTCHA/proxy/network): %s", exc)

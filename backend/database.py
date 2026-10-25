@@ -59,7 +59,60 @@ def init_engine():
     return eng
 
 
+def migrate_schema(eng):
+    """Ensure all tables and new columns exist across SQLite and PostgreSQL."""
+    try:
+        import models  # noqa: F401
+        from sqlalchemy import inspect
+        Base.metadata.create_all(bind=eng)
+        inspector = inspect(eng)
+        tables = inspector.get_table_names()
+        
+        if "analyses" in tables:
+            existing_cols = {col["name"] for col in inspector.get_columns("analyses")}
+            analyses_defs = {
+                "stage": "VARCHAR(50) DEFAULT 'queued'",
+                "error_message": "TEXT",
+                "failed_stage": "VARCHAR(50)",
+                "papers_retrieved": "INTEGER DEFAULT 0",
+                "papers_analysed": "INTEGER DEFAULT 0",
+                "year_start": "INTEGER",
+                "year_end": "INTEGER",
+            }
+            with eng.begin() as conn:
+                for col_name, definition in analyses_defs.items():
+                    if col_name not in existing_cols:
+                        conn.execute(text(f'ALTER TABLE analyses ADD COLUMN "{col_name}" {definition}'))
+
+        if "research_papers" in tables:
+            existing_cols = {col["name"] for col in inspector.get_columns("research_papers")}
+            paper_defs = {
+                "doi": "VARCHAR(255)",
+                "url": "VARCHAR(1024)",
+                "pdf_url": "VARCHAR(1024)",
+                "source": "VARCHAR(100)",
+            }
+            with eng.begin() as conn:
+                for col_name, definition in paper_defs.items():
+                    if col_name not in existing_cols:
+                        conn.execute(text(f'ALTER TABLE research_papers ADD COLUMN "{col_name}" {definition}'))
+
+        if eng.dialect.name == "postgresql":
+            with eng.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE paper_authors DROP CONSTRAINT IF EXISTS paper_authors_paper_id_fkey;"
+                    "ALTER TABLE paper_authors ADD CONSTRAINT paper_authors_paper_id_fkey "
+                    "FOREIGN KEY (paper_id) REFERENCES research_papers (id) ON DELETE CASCADE;"
+                    "ALTER TABLE paper_topics DROP CONSTRAINT IF EXISTS paper_topics_paper_id_fkey;"
+                    "ALTER TABLE paper_topics ADD CONSTRAINT paper_topics_paper_id_fkey "
+                    "FOREIGN KEY (paper_id) REFERENCES research_papers (id) ON DELETE CASCADE;"
+                ))
+    except Exception as exc:
+        print(f"[DATABASE] Schema migration note: {exc}")
+
+
 engine = init_engine()
+migrate_schema(engine)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -69,3 +122,4 @@ def get_db():
         yield db
     finally:
         db.close()
+
