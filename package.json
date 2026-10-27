@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "AI-Assisted Research Gap Discovery and Recommendation System",
   "scripts": {
-    "start": "python run.py",
-    "dev": "python run.py"
+    "start": "streamlit run streamlit_app.py",
+    "dev": "streamlit run streamlit_app.py"
   }
 }

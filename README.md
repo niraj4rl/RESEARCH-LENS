@@ -135,9 +135,10 @@ Returns the comprehensive research discovery payload:
 - Node.js 18+
 - (Optional) Docker for PostgreSQL + pgvector. *If Docker is not installed or running, ResearchLens automatically falls back to an embedded zero-configuration SQLite database (`researchlens.db`).*
 
-### Quick Start (Single Command)
+### Quick Start (Streamlit)
 
-You can launch the entire system (backend, frontend, database initialization, and dependency synchronization) using any **one** of the following commands:
+ResearchLens now runs as a single Streamlit application. Install the Python
+dependencies and launch it with any **one** of the following commands:
 
 **Option A (Command Prompt / Windows Explorer):**
 ```cmd
@@ -159,19 +160,35 @@ python run.py
 npm start
 ```
 
-This single command will:
-1. Initialize the database (Docker PostgreSQL if running, or automatic embedded zero-config SQLite fallback).
-2. Check and sync backend Python dependencies.
-3. Check and install frontend packages.
-4. Launch the FastAPI backend on `http://localhost:8000`.
-5. Launch the Next.js frontend on `http://localhost:3000`.
-6. Gracefully shut down both servers together when you press `Ctrl+C`.
+If dependencies are not installed yet:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+On Windows, if multiple Python installations are present, use the same
+interpreter for installation and launch:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m streamlit run streamlit_app.py
+```
+
+The pinned `starlette` version is required for compatibility with the
+FastAPI-backed retrieval pipeline. Running `streamlit` directly from another
+Python installation can load an incompatible global FastAPI/Starlette pair.
+
+The app opens at `http://localhost:8501`. It initializes the existing database
+automatically, retrieves papers from the selected scholarly sources, and runs
+the evidence and gap synthesis pipeline in-process. The legacy FastAPI and
+Next.js clients remain in the repository for API compatibility, but are no
+longer required to use ResearchLens.
 
 ---
 
 ## Manual Step-by-Step Setup
 
-### Backend Setup
+### Legacy API Setup
 ```bash
 cd backend
 python -m venv venv
