@@ -1,0 +1,16 @@
+{
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "outputDirectory": "frontend/.next",
+  "installCommand": "cd frontend && npm install",
+  "framework": "nextjs",
+  "rewrites": [
+    {
+      "source": "/api/research/:path*",
+      "destination": "https://your-railway-backend.up.railway.app/api/research/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://your-railway-backend.up.railway.app/health"
+    }
+  ]
+}
